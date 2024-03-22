@@ -93,7 +93,6 @@ class CAD:
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1).squeeze()
             #print(probs)
-            return next_token, probs
 
         elif decoding_strategy == 'top_k':
             assert top_k is not None, "top_k must be provided for top_k sampling"
@@ -104,7 +103,7 @@ class CAD:
         elif decoding_strategy == 'greedy':
             next_token = torch.argmax(logits, dim=-1)
 
-        return next_token
+        return next_token, probs
 
     def kl_divergence(self, p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
         p_squeeze = p.squeeze()
