@@ -104,8 +104,6 @@ class CAD:
         
         if decoding_strategy == 'top_p':
             assert top_p is not None, "top_p must be provided for top_p sampling"
-            print("*****")
-            print(logits)
             logits = self._top_p_sampling(logits, top_p)
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1).squeeze()
@@ -129,14 +127,9 @@ class CAD:
         return kl
     def round_to_one_hot_unsqueeze(self, input):
         max_indices = torch.argmax(input, dim=1)
-        print(max_indices) 
-        one_hot_tensor = torch.zeros_like(input)
-        print(one_hot_tensor.shape) 
+        one_hot_tensor = torch.zeros_like(input) 
         one_hot_tensor.scatter_(1, max_indices.unsqueeze(1), 1) 
-        print(one_hot_tensor.shape)
         squeezed_input = torch.argmax(one_hot_tensor, dim=1)
-        print("######################")
-        print(squeezed_input.shape)
         unsqueezed_input = torch.unsqueeze(squeezed_input, 0)
         return unsqueezed_input
 
@@ -168,7 +161,7 @@ class CAD:
             input_ids_with_contexts = input_ids
             attention_mask_with_contexts = attention_mask
 
-        model = NN()
+        neural_net = NN()
         optimizer = optim.SGD(model.parameters(), lr=0.01)
         input_ids_with_contexts_squeezed = input_ids_with_contexts.squeeze()
         inputs_with_contexts_final = torch.nn.functional.one_hot(input_ids_with_contexts_squeezed, num_classes=32001).float()
@@ -181,26 +174,19 @@ class CAD:
         sent_lengths = input_ids_with_contexts.new(batch_size).fill_(max_length)
 
         generated_tokens = [[] for _ in range(batch_size)] # e.g., [[4132, 102, 29402], [2378, 7893, 23001]]
-
-        # Generate tokens
         with torch.no_grad():
             while cur_len < max_length:
-                print("*********************************")
-                print(input_ids_with_contexts.shape)
-                print(attention_mask_with_contexts.shape)
-            
                 outputs = self.model(input_ids, attention_mask=attention_mask)
                 next_token_logits = outputs.logits[:, -1, :] # (batch_size, vocab_size)
                 # * Context-aware Decoding
                 if contexts and use_context_aware:
-                   # print("Input_ids_with_context_shape: ", input_ids_with_contexts.shape)
-                    #print("Input_ids_with_contexts: ", input_ids_with_contexts)
                     outputs_with_contexts = self.model(input_ids_with_contexts, attention_mask=attention_mask_with_contexts)
                     print("Input with context before", input_ids_with_contexts.shape)
-                    #print("Output with contexts before: ", outputs_with_contexts)
-                    #print(type(outputs_with_contexts))
                     print("logit before: ", outputs_with_contexts.logits)
-                    #print("Output with contexts shape: ", outputs_with_contexts.shape)
+                    min_logits_b = torch.min(outputs_with_contexts.logits)
+                    max_logits_b = torch.max(outputs_with_contexts.logits)
+                    print("Minimum Logit:", min_logits_b.item())
+                    print("Maximum Logit:", max_logits_b.item())
                     next_token_logits_with_contexts = outputs_with_contexts.logits[:, -1, :]
                     next_token_logits = (1 + alpha) * next_token_logits_with_contexts - alpha * next_token_logits
 
@@ -215,16 +201,15 @@ class CAD:
                                                     generated_tokens=[set(tokens) for tokens in generated_tokens])
                 
                 for epoch in range(epochs):
-                    #print(inputs_with_contexts_final.shape)
-                    output_ids_with_context = model(inputs_with_contexts_final)
-                    #print(output_ids_with_context.shape)
+                    output_ids_with_context = neural_net(inputs_with_contexts_final)
                     output_ids_with_context_final = self.round_to_one_hot_unsqueeze(output_ids_with_context)
-                    #print("Output_ids_with_context_final_shape: ", output_ids_with_context_final.shape)
-                    #print("Output_ids_with_context_final: ", output_ids_with_context_final)
                     predicted_output_with_context =  self.model(output_ids_with_context_final, attention_mask=attention_mask)
-                    #print("predicted_output_with_context: ", predicted_output_with_context)
                     print("Input with context after", output_ids_with_context_final.shape)
                     print("logit after", predicted_output_with_context.logits)
+                    min_logits = torch.min(predicted_output_with_context.logits)
+                    max_logits = torch.max(predicted_output_with_context.logits)
+                    print("Minimum Logit:", min_logits.item())
+                    print("Maximum Logit:", max_logits.item())
                     predicted_next_token_logits_with_contexts = predicted_output_with_context.logits[:, -1, :]
                     predicted_next_token_logits = (1 + alpha) *  predicted_next_token_logits_with_contexts - alpha * next_token_logits
                     predicted_next_token, predicted_probs = self.predict_next_token(logits=predicted_next_token_logits, 
@@ -255,7 +240,6 @@ class CAD:
                 attention_mask = torch.cat([attention_mask, unfinished_sents.unsqueeze(-1)], dim=-1)
                 input_ids_with_contexts = torch.cat([input_ids_with_contexts, tokens_to_add.unsqueeze(-1)], dim=-1)
                 attention_mask_with_contexts = torch.cat([attention_mask_with_contexts, unfinished_sents.unsqueeze(-1)], dim=-1)
-
                 cur_len += 1
 
                 # Update generated tokens and check for completion
