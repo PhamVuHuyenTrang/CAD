@@ -182,7 +182,7 @@ class CAD:
 
         generated_tokens = [[] for _ in range(batch_size)] # e.g., [[4132, 102, 29402], [2378, 7893, 23001]]
 
-        # Generate tokensScreenshot from 2024-03-29 16-35-57
+        # Generate tokens
         with torch.no_grad():
             while cur_len < max_length:
                 print("*********************************")
