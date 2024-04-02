@@ -25,7 +25,7 @@ set_seed(1002)
 class NN(nn.Module):
     def __init__(self):
         super(NN, self).__init__()
-        self.fc = nn.Linear(32001, 32001) 
+        self.fc = nn.Linear(4096, 4096) 
         self.activation = nn.ReLU()  
 
     def forward(self, x):
@@ -37,6 +37,7 @@ class NN(nn.Module):
 class CAD:
     def __init__(self, model_name: str, device: Union[int,str] = 0):
         self.model = AutoModelForCausalLM.from_pretrained(model_name, load_in_8bit=True, device_map=device, use_cache=True)
+        self.embed_tokens = self.model.get_input_embeddings()
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         
         if model_name.startswith('huggyllama'): # add [PAD] token to tokenizer if model_name is huggyllama, because huggyllama doesn't have a pad token
@@ -104,7 +105,7 @@ class CAD:
         
         if decoding_strategy == 'top_p':
             assert top_p is not None, "top_p must be provided for top_p sampling"
-            logits = self._top_p_sampling(logits, top_p)
+            #logits = self._top_p_sampling(logits, top_p)
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1).squeeze()
 
@@ -125,14 +126,6 @@ class CAD:
         q_squeeze = q.squeeze()
         kl =  torch.sum(p_squeeze * torch.log((p_squeeze + 1e-4) / (q_squeeze + 1e-4)))
         return kl
-    def round_to_one_hot_unsqueeze(self, input):
-        max_indices = torch.argmax(input, dim=1)
-        one_hot_tensor = torch.zeros_like(input) 
-        one_hot_tensor.scatter_(1, max_indices.unsqueeze(1), 1) 
-        squeezed_input = torch.argmax(one_hot_tensor, dim=1)
-        unsqueezed_input = torch.unsqueeze(squeezed_input, 0)
-        return unsqueezed_input
-
     def generate(self, 
                 input_texts: List[str], 
                 contexts: Optional[List[str]] = None, 
@@ -162,10 +155,8 @@ class CAD:
             attention_mask_with_contexts = attention_mask
 
         neural_net = NN()
-        optimizer = optim.SGD(model.parameters(), lr=0.01)
-        input_ids_with_contexts_squeezed = input_ids_with_contexts.squeeze()
-        inputs_with_contexts_final = torch.nn.functional.one_hot(input_ids_with_contexts_squeezed, num_classes=32001).float()
-        epochs = 3
+        optimizer = optim.SGD(neural_net.parameters(), lr=0.01)
+        epochs = 100
       
         # Initialize variables for generation loop
         cur_len = 0
@@ -181,12 +172,6 @@ class CAD:
                 # * Context-aware Decoding
                 if contexts and use_context_aware:
                     outputs_with_contexts = self.model(input_ids_with_contexts, attention_mask=attention_mask_with_contexts)
-                    print("Input with context before", input_ids_with_contexts.shape)
-                    print("logit before: ", outputs_with_contexts.logits)
-                    min_logits_b = torch.min(outputs_with_contexts.logits)
-                    max_logits_b = torch.max(outputs_with_contexts.logits)
-                    print("Minimum Logit:", min_logits_b.item())
-                    print("Maximum Logit:", max_logits_b.item())
                     next_token_logits_with_contexts = outputs_with_contexts.logits[:, -1, :]
                     next_token_logits = (1 + alpha) * next_token_logits_with_contexts - alpha * next_token_logits
 
@@ -201,17 +186,14 @@ class CAD:
                                                     generated_tokens=[set(tokens) for tokens in generated_tokens])
                 
                 for epoch in range(epochs):
-                    output_ids_with_context = neural_net(inputs_with_contexts_final)
-                    output_ids_with_context_final = self.round_to_one_hot_unsqueeze(output_ids_with_context)
-                    predicted_output_with_context =  self.model(output_ids_with_context_final, attention_mask=attention_mask)
-                    print("Input with context after", output_ids_with_context_final.shape)
-                    print("logit after", predicted_output_with_context.logits)
-                    min_logits = torch.min(predicted_output_with_context.logits)
-                    max_logits = torch.max(predicted_output_with_context.logits)
-                    print("Minimum Logit:", min_logits.item())
-                    print("Maximum Logit:", max_logits.item())
-                    predicted_next_token_logits_with_contexts = predicted_output_with_context.logits[:, -1, :]
-                    predicted_next_token_logits = (1 + alpha) *  predicted_next_token_logits_with_contexts - alpha * next_token_logits
+                    inputs_embeds = self.embed_tokens(input_ids_with_contexts)
+                    inputs_embeds = neural_net(inputs_embeds)
+                    inputs_embeds = torch.unsqueeze(inputs_embeds, 0)
+                    inputs_embeds = self.embed_tokens(inputs_embeds)
+                    predicted_outputs_with_contexts = self.model(input_ids_with_contexts, attention_mask=attention_mask_with_contexts, inputs_embeds = inputs_embeds)
+                    predicted_next_token_logits_with_contexts = predicted_outputs_with_contexts.logits[:, -1, :]
+                    predicted_next_token_logits = (1 + alpha) * predicted_next_token_logits_with_contexts - alpha * next_token_logits
+    
                     predicted_next_token, predicted_probs = self.predict_next_token(logits=predicted_next_token_logits, 
                                                     decoding_strategy=decoding_strategy, 
                                                     top_p=top_p_value, 
@@ -219,16 +201,12 @@ class CAD:
                                                     use_repetition_penalty=use_repetition_penalty, 
                                                     repetition_penalty_value=repetition_penalty_value, 
                                                     generated_tokens=[set(tokens) for tokens in generated_tokens])
-                    print(self.compute_kl(probs, predicted_probs))
-                    exit()
                     loss = self.compute_kl(probs, predicted_probs)
 
                     optimizer.zero_grad()
+                    loss.requires_grad = True
                     loss.backward()
                     optimizer.step()
-
-                    if (epoch+1) % 100 == 0:
-                        print(f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}')
                 # Handle EOS token and padding
                 if self.tokenizer.eos_token_id is not None:
                     tokens_to_add = predicted_next_token * unfinished_sents + (self.tokenizer.pad_token_id) * (1 - unfinished_sents)
@@ -264,26 +242,6 @@ cad_model = CAD(model_name="huggyllama/llama-7b", device=4)
 contexts = ['Write a quote that ends in the word "early":']
 input_texts = ['Better late than']
 print("Context aware:")
-outputs = cad_model.generate(
-                            input_texts=input_texts,
-                            use_context_aware=True,
-                            contexts=contexts,
-                            max_length=20,
-                            alpha=0.5,
-                            decoding_strategy='top_p',
-                            top_p_value=0.9,
-                            use_repetition_penalty=True,
-                            repetition_penalty_value=1.5,
-                            )
-exit()
-print(cad_model.tokenizer.batch_decode(outputs, skip_special_tokens=True)[0])
-for i in outputs[0]:
-    print(f'Token ID : {i} | Token: {cad_model.tokenizer.decode(i)}')
-
-contexts = ['Write a quote that ends in the word "early":']
-input_texts = ['Better late than']
-
-print("Normal")
 outputs = cad_model.generate(
                             input_texts=input_texts,
                             use_context_aware=True,
